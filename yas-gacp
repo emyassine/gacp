@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# yas-gacp - git add + commit + push, with readable colored output.
+# Usage: yas-gacp "commit message"
+# Disable colors: NO_COLOR=1 ./gacp.sh "message"
+
+set -u
+
+# ----------------------------- Colors -----------------------------
+use_color() { [[ -t "$1" && -z "${NO_COLOR:-}" ]]; }
+
+if use_color 1; then
+    RESET=$'\033[0m'; BOLD=$'\033[1m'; DIM=$'\033[2m'
+    RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'
+    BLUE=$'\033[34m'; MAGENTA=$'\033[35m'; CYAN=$'\033[36m'
+else
+    RESET=''; BOLD=''; DIM=''; RED=''; GREEN=''; YELLOW=''; BLUE=''; MAGENTA=''; CYAN=''
+fi
+
+if use_color 2; then
+    E_RESET=$'\033[0m'; E_BOLD=$'\033[1m'; E_RED=$'\033[31m'
+    E_YELLOW=$'\033[33m'; E_CYAN=$'\033[36m'
+else
+    E_RESET=''; E_BOLD=''; E_RED=''; E_YELLOW=''; E_CYAN=''
+fi
+
+# -------------------------- Output helpers --------------------------
+TOTAL_STEPS=4
+
+step()  { printf '\n%s%s[%s/%s]%s %s%s%s\n' "$BOLD" "$BLUE" "$1" "$TOTAL_STEPS" "$RESET" "$BOLD" "$2" "$RESET"; }
+ok()    { printf '  %s[OK]%s %s\n' "$GREEN$BOLD" "$RESET" "$*"; }
+info()  { printf '  %s[i]%s  %s\n' "$CYAN$BOLD" "$RESET" "$*"; }
+warn()  { printf '  %s[!]%s  %s\n' "$YELLOW$BOLD" "$RESET" "$*"; }
+dim()   { printf '      %s%s%s\n' "$DIM" "$*" "$RESET"; }
+
+err()   { printf '  %s[ERROR]%s %s\n' "$E_BOLD$E_RED" "$E_RESET" "$*" >&2; }
+diag()  { printf '  %s->  Diagnosis:%s %s\n' "$E_BOLD$E_YELLOW" "$E_RESET" "$*" >&2; }
+hint()  { printf '  %s->  Run:%s %s%s%s\n' "$E_BOLD$E_CYAN" "$E_RESET" "$E_BOLD" "$*" "$E_RESET" >&2; }
+
+# Print staged files with a colored status letter (A/M/D/R...)
+print_staged_files() {
+    local max=20 count=0 total status path rest
+    total=$(git diff --cached --name-status | wc -l | tr -d ' ')
+    while IFS=$'\t' read -r status path rest; do
+        [[ -z "$status" ]] && continue
+        local color="$YELLOW" label="$status"
+        case "${status:0:1}" in
+            A) color="$GREEN";   label="A" ;;
+            M) color="$YELLOW";  label="M" ;;
+            D) color="$RED";     label="D" ;;
+            R) color="$CYAN";    label="R"; path="${path} -> ${rest:-}" ;;
+            C) color="$CYAN";    label="C"; path="${path} -> ${rest:-}" ;;
+        esac
+        printf '      %s%s%s  %s\n' "$color$BOLD" "$label" "$RESET" "$path"
+        count=$((count + 1))
+        if (( count >= max )); then
+            local remaining=$((total - max))
+            (( remaining > 0 )) && printf '      %s... and %s more file(s)%s\n' "$DIM" "$remaining" "$RESET"
+            break
+        fi
+    done < <(git diff --cached --name-status)
+}
+
+# Run a command in the background with a spinner; output goes to a log file.
+run_with_spinner() {
+    local label=$1 log=$2
+    shift 2
+    "$@" >"$log" 2>&1 &
+    local pid=$! i=0
+    local frames=('|' '/' '-' '\')
+    if [[ -t 1 ]]; then
+        printf '\033[?25l'
+        while kill -0 "$pid" 2>/dev/null; do
+            printf '\r  %s%s%s %s' "$CYAN" "${frames[i % 4]}" "$RESET" "$label"
+            i=$((i + 1))
+            sleep 0.1
+        done
+        printf '\r\033[K\033[?25h'
+    fi
+    wait "$pid"
+}
+
+cleanup() {
+    [[ -t 1 ]] && printf '\033[?25h'
+    [[ -n "${push_log:-}" ]] && rm -f "$push_log"
+}
+trap cleanup EXIT
+trap 'printf "\n"; warn "Interrupted."; exit 130' INT TERM
+
+# ----------------------------- Validation -----------------------------
+if [[ $# -eq 0 ]]; then
+    printf '%sUsage:%s %s "commit message"\n' "$E_BOLD" "$E_RESET" "$0" >&2
+    exit 2
+fi
+
+commit_message="$*"
+if [[ -z "${commit_message//[[:space:]]/}" ]]; then
+    err "Commit message cannot be empty. Nothing was staged or committed."
+    exit 2
+fi
+
+if ! repo_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    err "this is not inside a Git repository."
+    exit 2
+fi
+
+branch=$(git branch --show-current)
+if [[ -z "$branch" ]]; then
+    err "HEAD is detached; switch to a branch before using yas-gacp."
+    exit 2
+fi
+
+upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+
+# ------------------------------- Header -------------------------------
+printf '\n%s%s+-- gacp : add / commit / push --+%s\n' "$BOLD" "$MAGENTA" "$RESET"
+printf '  %sRepo   %s %s\n' "$DIM" "$RESET" "$(basename "$repo_root")"
+printf '  %sBranch %s %s%s%s\n' "$DIM" "$RESET" "$BOLD$GREEN" "$branch" "$RESET"
+if [[ -n "$upstream" ]]; then
+    printf '  %sRemote %s %s\n' "$DIM" "$RESET" "$upstream"
+else
+    printf '  %sRemote %s %s(no upstream yet)%s\n' "$DIM" "$RESET" "$YELLOW" "$RESET"
+fi
+printf '  %sMessage%s %s"%s"%s\n' "$DIM" "$RESET" "$BOLD" "$commit_message" "$RESET"
+
+# ------------------------------ 1. Add ------------------------------
+step 1 "Staging changes (git add -A)"
+if ! git add -A; then
+    err "git add failed. No commit or push was attempted."
+    exit 1
+fi
+
+committed=0
+if ! git diff --cached --quiet; then
+    print_staged_files
+    shortstat=$(git diff --cached --shortstat | sed 's/^ *//')
+    [[ -n "$shortstat" ]] && dim "$shortstat"
+    ok "Changes staged."
+
+    # ---------------------------- 2. Commit ----------------------------
+    step 2 "Creating local commit"
+    if ! commit_out=$(git commit -m "$commit_message" 2>&1); then
+        printf '%s\n' "$commit_out" >&2
+        err "commit failed. Review the message above; no push was attempted."
+        exit 1
+    fi
+    committed=1
+    ok "Commit saved: ${BOLD}${YELLOW}$(git rev-parse --short HEAD)${RESET} ${DIM}on ${branch}${RESET}"
+else
+    ok "Nothing to stage."
+    step 2 "Creating local commit"
+    info "No new file changes to commit."
+fi
+
+# ------------------------- 3. Upstream check -------------------------
+step 3 "Checking what needs pushing"
+if [[ -n "$upstream" ]]; then
+    ahead=$(git rev-list --count "${upstream}..HEAD" 2>/dev/null || printf '0')
+    if [[ "$ahead" == "0" ]]; then
+        ok "Already up to date with ${BOLD}${upstream}${RESET}. Nothing to push."
+        printf '\n%s%s[DONE]%s\n\n' "$BOLD" "$GREEN" "$RESET"
+        exit 0
+    fi
+    info "${BOLD}${ahead}${RESET} local commit(s) to push to ${BOLD}${upstream}${RESET}."
+else
+    info "No upstream configured; will publish ${BOLD}${branch}${RESET} to ${BOLD}origin${RESET}."
+fi
+
+# ------------------------------ 4. Push ------------------------------
+step 4 "Pushing"
+push_log=$(mktemp "${TMPDIR:-/tmp}/gacp-push.XXXXXX") || {
+    err "could not create a temporary log for push diagnostics."
+    exit 1
+}
+
+if [[ -n "$upstream" ]]; then
+    push_cmd=(git push)
+    success_msg="Push succeeded. Local and remote branches are synchronized."
+else
+    push_cmd=(git push --set-upstream origin "$branch")
+    success_msg="Push succeeded; upstream is now set to ${BOLD}origin/${branch}${RESET}."
+fi
+
+if run_with_spinner "Pushing to remote..." "$push_log" "${push_cmd[@]}"; then
+    # Show git output (dimmed), then the success message
+    while IFS= read -r line; do dim "$line"; done <"$push_log"
+    ok "$success_msg"
+    printf '\n%s%s[ALL DONE]%s\n\n' "$BOLD" "$GREEN" "$RESET"
+    exit 0
+else
+    push_status=$?
+fi
+
+# --------------------------- Push failure ---------------------------
+printf '\n' >&2
+while IFS= read -r line; do
+    printf '      %s%s%s\n' "$E_RED" "$line" "$E_RESET" >&2
+done <"$push_log"
+
+printf '\n' >&2
+err "PUSH FAILED (exit code ${push_status})."
+if (( committed )); then
+    printf '  %s[OK] Your local commit is still saved; it was not lost.%s\n' "$E_CYAN" "$E_RESET" >&2
+fi
+
+if grep -Eiq 'fatal error in commit_refs|commit_refs_rules|HTTP 5[0-9][0-9]|internal server error' "$push_log"; then
+    diag "GitHub returned a server-side error. Wait a little, then retry."
+    printf '  %s    The commit is already local; do not recreate it.%s\n' "$E_CYAN" "$E_RESET" >&2
+    hint "git push"
+elif grep -Eiq 'could not resolve host|failed to connect|connection timed out|network is unreachable|temporary failure in name resolution' "$push_log"; then
+    diag "network or DNS problem. Restore connectivity, then retry."
+    hint "git push"
+elif grep -Eiq 'protected branch|repository rule|GH013|ruleset|secret scanning|push declined' "$push_log"; then
+    diag "GitHub blocked the push because of a repository rule. Read the rejection details above and fix that specific violation."
+    hint "git push"
+elif grep -Eiq 'non-fast-forward|fetch first|rejected.*behind' "$push_log"; then
+    diag "the remote has commits you do not have."
+    hint "git pull --rebase   # resolve conflicts if any, then: git push"
+elif grep -Eiq 'permission denied|authentication failed|could not read username|403|not found' "$push_log"; then
+    diag "GitHub authentication, access, or repository URL problem. Fix access, then retry."
+    hint "git push"
+else
+    diag "see the Git error above. Fix its cause, then retry."
+    hint "git push"
+fi
+
+printf '\n' >&2
+exit 1
