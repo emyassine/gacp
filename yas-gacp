@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # yas-gacp - git add + commit + push, with readable colored output.
 # Usage: yas-gacp "commit message"
-# Disable colors: NO_COLOR=1 ./gacp.sh "message"
+# Disable colors: NO_COLOR=1 yas-gacp "message"
 
 set -u
 
@@ -112,7 +112,7 @@ fi
 upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
 
 # ------------------------------- Header -------------------------------
-printf '\n%s%s+-- gacp : add / commit / push --+%s\n' "$BOLD" "$MAGENTA" "$RESET"
+printf '\n%s%s+-- yas-gacp : add / commit / push --+%s\n' "$BOLD" "$MAGENTA" "$RESET"
 printf '  %sRepo   %s %s\n' "$DIM" "$RESET" "$(basename "$repo_root")"
 printf '  %sBranch %s %s%s%s\n' "$DIM" "$RESET" "$BOLD$GREEN" "$branch" "$RESET"
 if [[ -n "$upstream" ]]; then

@@ -26,29 +26,43 @@ fi
 install -m 0755 "$tmp_file" "$DEST" || fail "could not install to $DEST"
 say "Installed $DEST"
 
-case "$(basename "${SHELL:-sh}")" in
+shell_name=$(basename "${SHELL:-sh}")
+path_line='case ":$PATH:" in *:"$HOME/.local/bin":*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
+
+add_path_setup() {
+    target=$1
+    mkdir -p "$(dirname "$target")" || fail "could not prepare $(dirname "$target")"
+    : >> "$target" || fail "could not update $target"
+    if ! grep -Fq "$path_line" "$target"; then
+        {
+            printf '\n# Added by yas-gacp installer\n%s\n' "$path_line"
+        } >> "$target" || fail "could not update $target"
+        say "Added ~/.local/bin to PATH in $target"
+    else
+        say "PATH setup already exists in $target"
+    fi
+}
+
+case "$shell_name" in
     zsh)
-        rc_file="$HOME/.zshrc"
+        add_path_setup "$HOME/.zshrc"
+        reload_hint='. "$HOME/.zshrc"'
         ;;
     bash)
-        rc_file="$HOME/.bashrc"
+        add_path_setup "$HOME/.bashrc"
+        # macOS Terminal commonly starts login Bash, which reads .bash_profile.
+        if [ "$(uname -s 2>/dev/null || true)" = Darwin ] || [ -f "$HOME/.bash_profile" ]; then
+            add_path_setup "$HOME/.bash_profile"
+            reload_hint='. "$HOME/.bash_profile"'
+        else
+            reload_hint='. "$HOME/.bashrc"'
+        fi
         ;;
     *)
-        rc_file="$HOME/.profile"
+        add_path_setup "$HOME/.profile"
+        reload_hint='. "$HOME/.profile"'
         ;;
 esac
 
-mkdir -p "$(dirname "$rc_file")" || fail "could not prepare $(dirname "$rc_file")"
-: >> "$rc_file" || fail "could not update $rc_file"
-path_line='case ":$PATH:" in *:"$HOME/.local/bin":*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
-if ! grep -Fq "$path_line" "$rc_file"; then
-    {
-        printf '\n# Added by yas-gacp installer\n%s\n' "$path_line"
-    } >> "$rc_file" || fail "could not update $rc_file"
-    say "Added ~/.local/bin to PATH in $rc_file"
-else
-    say "PATH setup already exists in $rc_file"
-fi
-
-say 'Open a new terminal or run: . '"$rc_file"
+say "Open a new terminal or run: $reload_hint"
 say 'Then run: yas-gacp "your commit message"'
