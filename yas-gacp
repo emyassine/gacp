@@ -5,6 +5,8 @@
 
 set -u
 
+VERSION='1.1.0'
+
 # ----------------------------- Colors -----------------------------
 use_color() { [[ -t "$1" && -z "${NO_COLOR:-}" ]]; }
 
@@ -35,6 +37,77 @@ dim()   { printf '      %s%s%s\n' "$DIM" "$*" "$RESET"; }
 err()   { printf '  %s[ERROR]%s %s\n' "$E_BOLD$E_RED" "$E_RESET" "$*" >&2; }
 diag()  { printf '  %s->  Diagnosis:%s %s\n' "$E_BOLD$E_YELLOW" "$E_RESET" "$*" >&2; }
 hint()  { printf '  %s->  Run:%s %s%s%s\n' "$E_BOLD$E_CYAN" "$E_RESET" "$E_BOLD" "$*" "$E_RESET" >&2; }
+
+usage() {
+    cat <<EOF
+Usage:
+  yas-gacp "commit message"  Stage, commit, and push the current branch
+  yas-gacp --version          Print the installed version
+  yas-gacp --update           Update yas-gacp from its GitHub main branch
+  yas-gacp --help             Show this help
+EOF
+}
+
+update_self() (
+    local script_path target tmp new_version
+    script_path=$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")
+    if [[ "$script_path" != /* ]]; then
+        script_path="$PWD/$script_path"
+    fi
+    target=$(readlink -f -- "$script_path" 2>/dev/null || printf '%s' "$script_path")
+    tmp=$(mktemp "${TMPDIR:-/tmp}/yas-gacp-update.XXXXXX") || {
+        err 'could not create a temporary update file.'
+        return 1
+    }
+    trap 'rm -f "$tmp" "${target}.new"' EXIT
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL 'https://raw.githubusercontent.com/emyassine/gacp/main/yas-gacp' -o "$tmp" || {
+            err 'update download failed; check your connection and retry.'
+            return 1
+        }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q 'https://raw.githubusercontent.com/emyassine/gacp/main/yas-gacp' -O "$tmp" || {
+            err 'update download failed; check your connection and retry.'
+            return 1
+        }
+    else
+        err 'curl or wget is required to update yas-gacp.'
+        return 1
+    fi
+
+    if [[ ! -s "$tmp" ]] || ! grep -q '^VERSION=' "$tmp" || ! bash -n "$tmp"; then
+        err 'downloaded update is empty or invalid; existing installation was kept.'
+        return 1
+    fi
+    new_version=$(sed -n "s/^VERSION='\([^']*\)'$/\1/p" "$tmp")
+    if [[ -z "$new_version" ]]; then
+        err 'downloaded update has no valid version; existing installation was kept.'
+        return 1
+    fi
+    if ! install -m 0755 "$tmp" "${target}.new" || ! mv -f -- "${target}.new" "$target"; then
+        err "could not replace $target."
+        return 1
+    fi
+    ok "Updated yas-gacp from ${VERSION} to ${new_version} at ${target}."
+)
+
+show_merge_hint() {
+    local target_branch='main'
+    if ! git show-ref --verify --quiet "refs/heads/${target_branch}"; then
+        if git show-ref --verify --quiet refs/heads/master; then
+            target_branch='master'
+        else
+            return 0
+        fi
+    fi
+    [[ "$branch" == "$target_branch" ]] && return 0
+
+    printf '\n%s%s[BRANCH]%s You are on %s, not %s.\n' "$BOLD" "$YELLOW" "$RESET" "$branch" "$target_branch"
+    printf '  To merge this branch into %s later:\n' "$target_branch"
+    printf '    git switch %s && git pull --ff-only && git merge --no-ff %s && git push origin %s\n' "$target_branch" "$branch" "$target_branch"
+    printf '  Or ask Codex: "merge %s into %s".\n' "$branch" "$target_branch"
+}
 
 # Print staged files with a colored status letter (A/M/D/R...)
 print_staged_files() {
@@ -86,9 +159,31 @@ cleanup() {
 trap cleanup EXIT
 trap 'printf "\n"; warn "Interrupted."; exit 130' INT TERM
 
+if [[ $# -eq 1 ]]; then
+    case "$1" in
+        --version|-v)
+            printf 'yas-gacp %s\n' "$VERSION"
+            exit 0
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --update)
+            update_self
+            exit $?
+            ;;
+    esac
+fi
+if [[ $# -gt 1 && "$1" == --* ]]; then
+    err "options must be used on their own."
+    usage >&2
+    exit 2
+fi
+
 # ----------------------------- Validation -----------------------------
 if [[ $# -eq 0 ]]; then
-    printf '%sUsage:%s %s "commit message"\n' "$E_BOLD" "$E_RESET" "$0" >&2
+    usage >&2
     exit 2
 fi
 
@@ -157,6 +252,7 @@ if [[ -n "$upstream" ]]; then
     ahead=$(git rev-list --count "${upstream}..HEAD" 2>/dev/null || printf '0')
     if [[ "$ahead" == "0" ]]; then
         ok "Already up to date with ${BOLD}${upstream}${RESET}. Nothing to push."
+        show_merge_hint
         printf '\n%s%s[DONE]%s\n\n' "$BOLD" "$GREEN" "$RESET"
         exit 0
     fi
@@ -184,6 +280,7 @@ if run_with_spinner "Pushing to remote..." "$push_log" "${push_cmd[@]}"; then
     # Show git output (dimmed), then the success message
     while IFS= read -r line; do dim "$line"; done <"$push_log"
     ok "$success_msg"
+    show_merge_hint
     printf '\n%s%s[ALL DONE]%s\n\n' "$BOLD" "$GREEN" "$RESET"
     exit 0
 else
