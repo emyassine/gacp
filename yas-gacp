@@ -5,7 +5,10 @@
 
 set -u
 
-VERSION='1.1.0'
+VERSION='1.2.0'
+EDITION='2026'
+RELEASED='November 8, 2026 at 05:01 UTC'
+RELEASE_NOTES='--update now reports whether it changed the installed file and summarizes the release; --version includes the dated edition.'
 
 # ----------------------------- Colors -----------------------------
 use_color() { [[ -t "$1" && -z "${NO_COLOR:-}" ]]; }
@@ -49,12 +52,15 @@ EOF
 }
 
 update_self() (
-    local script_path target tmp new_version
+    local script_path target tmp old_version old_edition old_released new_version new_edition new_released release_notes
     script_path=$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")
     if [[ "$script_path" != /* ]]; then
         script_path="$PWD/$script_path"
     fi
     target=$(readlink -f -- "$script_path" 2>/dev/null || printf '%s' "$script_path")
+    old_version=$(sed -n "s/^VERSION='\([^']*\)'$/\1/p" "$target" 2>/dev/null || true)
+    old_edition=$(sed -n "s/^EDITION='\([^']*\)'$/\1/p" "$target" 2>/dev/null || true)
+    old_released=$(sed -n "s/^RELEASED='\([^']*\)'$/\1/p" "$target" 2>/dev/null || true)
     tmp=$(mktemp "${TMPDIR:-/tmp}/yas-gacp-update.XXXXXX") || {
         err 'could not create a temporary update file.'
         return 1
@@ -81,15 +87,28 @@ update_self() (
         return 1
     fi
     new_version=$(sed -n "s/^VERSION='\([^']*\)'$/\1/p" "$tmp")
-    if [[ -z "$new_version" ]]; then
-        err 'downloaded update has no valid version; existing installation was kept.'
+    new_edition=$(sed -n "s/^EDITION='\([^']*\)'$/\1/p" "$tmp")
+    new_released=$(sed -n "s/^RELEASED='\([^']*\)'$/\1/p" "$tmp")
+    release_notes=$(sed -n "s/^RELEASE_NOTES='\(.*\)'$/\1/p" "$tmp")
+    if [[ -z "$new_version" || -z "$new_edition" || -z "$new_released" || -z "$release_notes" ]]; then
+        err 'downloaded update is missing version or release details; existing installation was kept.'
         return 1
+    fi
+    if cmp -s "$tmp" "$target"; then
+        ok "Already up to date: yas-gacp ${new_version} (edition ${new_edition}, released ${new_released})."
+        info "Checked the GitHub release; no files changed at ${target}."
+        return 0
     fi
     if ! install -m 0755 "$tmp" "${target}.new" || ! mv -f -- "${target}.new" "$target"; then
         err "could not replace $target."
         return 1
     fi
-    ok "Updated yas-gacp from ${VERSION} to ${new_version} at ${target}."
+    [[ -n "$old_version" ]] || old_version='unknown version'
+    [[ -n "$old_edition" ]] || old_edition='edition unknown'
+    [[ -n "$old_released" ]] || old_released='release date unavailable'
+    ok "Updated yas-gacp: ${old_version} (${old_edition}, ${old_released}) -> ${new_version} (edition ${new_edition}, released ${new_released})."
+    info "Downloaded, syntax-checked, and installed the latest script at ${target}."
+    info "Release notes: ${release_notes}"
 )
 
 show_merge_hint() {
@@ -162,7 +181,7 @@ trap 'printf "\n"; warn "Interrupted."; exit 130' INT TERM
 if [[ $# -eq 1 ]]; then
     case "$1" in
         --version|-v)
-            printf 'yas-gacp %s\n' "$VERSION"
+            printf 'yas-gacp %s (edition %s, released %s)\n' "$VERSION" "$EDITION" "$RELEASED"
             exit 0
             ;;
         --help|-h)
